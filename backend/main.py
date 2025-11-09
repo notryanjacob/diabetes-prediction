@@ -61,9 +61,21 @@ def _clean_env(value: str | None) -> str | None:
     return trimmed or None
 
 
+def _int_from_env(name: str, default: int) -> int:
+    raw_value = _clean_env(os.getenv(name))
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%s; using default %d.", name, raw_value, default)
+        return default
+
+
 GEMINI_API_KEY = _clean_env(os.getenv("GEMINI_API_KEY")) or _clean_env(
     os.getenv("GOOGLE_API_KEY")
 )
+GEMINI_MAX_OUTPUT_TOKENS = _int_from_env("GEMINI_MAX_OUTPUT_TOKENS", 3072)
 
 SELECTED_FEATURES = [
     "HighBP",
@@ -269,7 +281,7 @@ def initialize_plan_llm() -> None:
             plan_llm = ChatGoogleGenerativeAI(
                 model=GEMINI_MODEL_NAME,
                 temperature=0.4,
-                max_output_tokens=1536,
+                max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
             )
             logger.info(
                 "Gemini model '%s' initialized via LangChain for plan generation.",
@@ -444,7 +456,7 @@ def _invoke_gemini(prompt: str) -> str:
                 prompt,
                 generation_config={
                     "temperature": 0.4,
-                    "max_output_tokens": 2048,
+                    "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
                     "response_mime_type": "application/json",
                 },
             )
