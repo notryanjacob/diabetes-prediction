@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import joblib
 import numpy as np
@@ -17,6 +17,11 @@ try:
     from langchain_google_genai import ChatGoogleGenerativeAI
 except ImportError:  # pragma: no cover - optional dependency during dev
     ChatGoogleGenerativeAI = None  # type: ignore
+
+try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover - optional dependency during dev
+    genai = None  # type: ignore
 
 logger = logging.getLogger("diabetes-api")
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +52,18 @@ MODEL_PATH = Path("/Users/ryanjacob/Downloads/diabetes_prediction_model(2).pkl")
 BEST_THRESHOLD = 0.674
 PLAN_THRESHOLD = float(os.getenv("PLAN_THRESHOLD", "0.4"))
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+
+def _clean_env(value: str | None) -> str | None:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+GEMINI_API_KEY = _clean_env(os.getenv("GEMINI_API_KEY")) or _clean_env(
+    os.getenv("GOOGLE_API_KEY")
+)
 
 SELECTED_FEATURES = [
     "HighBP",
@@ -107,6 +123,7 @@ AGE_BUCKETS = [
 
 model = None
 plan_llm: ChatGoogleGenerativeAI | None = None
+plan_model: Any | None = None
 
 PlanType = Literal["workout", "diet", "both"]
 
@@ -232,27 +249,54 @@ def build_message(risk_level: Literal["low", "moderate", "high"]) -> str:
 
 
 def initialize_plan_llm() -> None:
-    global plan_llm
-    if GEMINI_API_KEY is None:
+    global plan_llm, plan_model
+    plan_llm = None
+    plan_model = None
+
+    effective_key = _clean_env(os.getenv("GOOGLE_API_KEY")) or GEMINI_API_KEY
+    if effective_key is None:
         logger.info("GEMINI_API_KEY not configured; skipping health plan generation setup.")
-        plan_llm = None
-        return
-    if ChatGoogleGenerativeAI is None:
-        logger.warning("langchain-google-genai not installed; health plans unavailable.")
-        plan_llm = None
         return
 
-    os.environ.setdefault("GOOGLE_API_KEY", GEMINI_API_KEY)
+    if os.getenv("GOOGLE_API_KEY") != effective_key:
+        os.environ["GOOGLE_API_KEY"] = effective_key
+        logger.debug("GOOGLE_API_KEY environment variable updated for Gemini access.")
+
+    if ChatGoogleGenerativeAI is None:
+        logger.warning("langchain-google-genai not installed; falling back to google-generativeai client.")
+    else:
+        try:
+            plan_llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL_NAME,
+                temperature=0.4,
+                max_output_tokens=1536,
+            )
+            logger.info(
+                "Gemini model '%s' initialized via LangChain for plan generation.",
+                GEMINI_MODEL_NAME,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to initialize LangChain Gemini model: %s", exc)
+            plan_llm = None
+
+    if genai is None:
+        if plan_llm is None:
+            logger.warning("google-generativeai not installed; health plans unavailable.")
+        return
+
     try:
-        plan_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL_NAME,
-            temperature=0.4,
-            max_output_tokens=1024,
+        genai.configure(api_key=effective_key)
+        plan_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+        logger.info(
+            "Gemini model '%s' initialized via google-generativeai fallback.",
+            GEMINI_MODEL_NAME,
         )
-        logger.info("Gemini model '%s' initialized for plan generation.", GEMINI_MODEL_NAME)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to initialize Gemini model: %s", exc)
-        plan_llm = None
+        plan_model = None
+        if plan_llm is None:
+            logger.exception("Failed to initialize Gemini fallback client: %s", exc)
+        else:
+            logger.warning("Failed to initialize Gemini fallback client: %s", exc)
 
 
 def build_plan_prompt(features: DiabetesFeatures, probability: float, plan_type: PlanType) -> str:
@@ -296,23 +340,139 @@ def extract_json_block(raw_text: str) -> str:
     return raw_text[start : end + 1]
 
 
-def generate_health_plan(
-    features: DiabetesFeatures, probability: float, plan_type: PlanType = "both"
-) -> HealthPlan:
-    if plan_llm is None:
-        raise RuntimeError("Gemini health plan generator is not configured.")
+def _extract_from_candidates(candidates: Any) -> str:
+    parts: list[str] = []
 
-    prompt = build_plan_prompt(features, probability, plan_type)
-    response = plan_llm.invoke(prompt)
-    print(response)
-    content = getattr(response, "content", response)
+    def _iter_parts(part_container: Any) -> list[str]:
+        collected: list[str] = []
+        if part_container is None:
+            return collected
+        items = part_container
+        if hasattr(part_container, "parts"):
+            items = part_container.parts
+        if isinstance(items, dict):
+            items = items.values()
+        for item in items or []:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+            else:
+                text_value = getattr(item, "text", None)
+            if text_value:
+                collected.append(str(text_value))
+        return collected
+
+    for candidate in candidates or []:
+        content = getattr(candidate, "content", None)
+        if content is None and isinstance(candidate, dict):
+            content = candidate.get("content")
+        parts.extend(_iter_parts(content))
+
+        candidate_parts = getattr(candidate, "parts", None)
+        if candidate_parts is None and isinstance(candidate, dict):
+            candidate_parts = candidate.get("parts")
+        parts.extend(_iter_parts(candidate_parts))
+
+    return "".join(parts).strip()
+
+
+def _extract_text_from_langchain_message(message: Any) -> str:
+    content = getattr(message, "content", message)
     if isinstance(content, list):
-        raw_text = "".join(
+        text = "".join(
             chunk.get("text", "") if isinstance(chunk, dict) else str(chunk) for chunk in content
         )
     else:
-        raw_text = str(content)
-    logger.info("Gemini raw response: %s", raw_text)
+        text = str(content)
+    if text.strip():
+        return text.strip()
+
+    metadata = getattr(message, "response_metadata", {})
+    if isinstance(metadata, dict):
+        fallback_text = _extract_from_candidates(metadata.get("candidates"))
+        if fallback_text:
+            return fallback_text
+    return text.strip()
+
+
+def _extract_text_from_genai_response(response: Any) -> str:
+    text = getattr(response, "text", None) or ""
+    if text.strip():
+        return text.strip()
+
+    extracted = _extract_from_candidates(getattr(response, "candidates", None))
+    if extracted:
+        return extracted
+    return text.strip()
+
+
+def _log_finish_reasons(response: Any) -> None:
+    candidates = getattr(response, "candidates", None) or []
+    finish_reasons: list[str] = []
+    for candidate in candidates:
+        reason = getattr(candidate, "finish_reason", None)
+        index = getattr(candidate, "index", None)
+        if reason:
+            label = f"candidate {index}" if index is not None else "candidate"
+            finish_reasons.append(f"{label}: {reason}")
+    if finish_reasons:
+        logger.warning("Gemini finish reasons: %s", "; ".join(finish_reasons))
+
+
+def _invoke_gemini(prompt: str) -> str:
+    last_error: Exception | None = None
+
+    if plan_llm is not None:
+        try:
+            response = plan_llm.invoke(prompt)
+            raw_text = _extract_text_from_langchain_message(response)
+            if raw_text.strip():
+                logger.info("Gemini raw response: %s", raw_text)
+                return raw_text
+            metadata = getattr(response, "response_metadata", {})
+            finish_reason = metadata.get("finish_reason") if isinstance(metadata, dict) else None
+            logger.warning(
+                "LangChain Gemini response was empty (finish_reason=%s); attempting fallback.",
+                finish_reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.exception("LangChain Gemini invocation failed: %s", exc)
+
+    if plan_model is not None:
+        try:
+            response = plan_model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.4,
+                    "max_output_tokens": 2048,
+                    "response_mime_type": "application/json",
+                },
+            )
+            raw_text = _extract_text_from_genai_response(response)
+            if raw_text.strip():
+                logger.info("Gemini raw response: %s", raw_text)
+                return raw_text
+            _log_finish_reasons(response)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.exception("Direct Gemini invocation failed: %s", exc)
+
+    if last_error is not None:
+        raise RuntimeError("Gemini plan generation failed") from last_error
+
+    raise RuntimeError(
+        "Gemini returned an empty response. Check max tokens, quotas, or adjust the prompt."
+    )
+
+
+def generate_health_plan(
+    features: DiabetesFeatures, probability: float, plan_type: PlanType = "both"
+) -> HealthPlan:
+    if plan_llm is None and plan_model is None:
+        raise RuntimeError("Gemini health plan generator is not configured.")
+
+    prompt = build_plan_prompt(features, probability, plan_type)
+    raw_text = _invoke_gemini(prompt)
 
     candidate = extract_json_block(raw_text)
     workout_text: str | None = None

@@ -20,13 +20,15 @@ The service now listens on `http://localhost:8000`. Update the `.env` file at th
 
 - Point the frontend to a different API base URL (`VITE_API_BASE_URL`).
 - Allow additional origins to call the backend (`ALLOWED_ORIGINS=http://localhost:5173,...`). Set `*` to allow any origin (cookies are disabled automatically in that case).
-- Enable Gemini-powered workout/diet plans by setting `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`, `PLAN_THRESHOLD`).
+- Enable Gemini-powered workout/diet plans by setting `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`, `PLAN_THRESHOLD`). If you
+  prefer `GOOGLE_API_KEY`, the backend will automatically mirror whichever non-empty key you provide so the LangChain and
+  google-generativeai Gemini clients can authenticate correctly.
 
 ## Endpoints
 
 - `GET /health`: lightweight readiness probe. Returns whether the model file was loaded.
 - `GET /predict/sample-features`: returns a ready-to-use payload that satisfies the schema (useful when testing with tools like cURL or Postman).
 - `POST /predict/sample`: runs the bundled sample payload through the model so you can verify the backend without filling out the questionnaire.
-- `POST /plan`: accepts `{ features, probability, planType }`, calls Gemini via LangChain, and returns personalized workout and/or diet plans (requires `GEMINI_API_KEY`).
+- `POST /plan`: accepts `{ features, probability, planType }`, calls Gemini (LangChain with a direct fallback), and returns personalized workout and/or diet plans (requires `GEMINI_API_KEY`).
 - `POST /plan/sample`: quickly generate a plan using the bundled sample features; accepts optional `probability` and `plan_type` query params.
 - `POST /predict`: accepts the full set of features collected by the chatbot and returns the probability, risk level, predicted label (based on the stored threshold), and a diabetes score from 0–10.
