@@ -7,19 +7,15 @@ import { Button } from "@/components/ui/button";
 import { useDiabetesChat } from "@/hooks/useDiabetesChat";
 import { Activity, RefreshCw } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { PlanGeneratorCard } from "@/components/PlanGeneratorCard";
 
 const Index = () => {
-  const { messages, isLoading, results, sendMessage, resetChat } = useDiabetesChat();
+  const { messages, isLoading, results, awaitingPlanChoice, sendMessage, resetChat } = useDiabetesChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5">
       {/* Header */}
@@ -92,12 +88,16 @@ const Index = () => {
                   </div>
                 </ScrollArea>
 
-                {!results && (
+                {(!results || awaitingPlanChoice) && (
                   <div className="pt-4 border-t">
                     <ChatInput
                       onSend={sendMessage}
                       disabled={isLoading}
-                      placeholder="Type your answer..."
+                      placeholder={
+                        awaitingPlanChoice
+                          ? "Type workout / diet / both / no..."
+                          : "Type your answer..."
+                      }
                     />
                   </div>
                 )}
@@ -148,6 +148,8 @@ const Index = () => {
               </CardContent>
             </Card>
           </div>
+
+          <PlanGeneratorCard />
         </div>
       </main>
 

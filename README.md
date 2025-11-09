@@ -71,3 +71,20 @@ Yes, you can!
 To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
 
 Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+
+## Diabetes prediction API
+
+This repo now includes a FastAPI service under `backend/` that loads your scikit-learn pickle file and powers the `/predict` endpoint used by the chat experience.
+
+1. Copy your trained `diabetes_prediction_model.pkl` into `backend/models/`.
+2. (Optional) Create a virtual environment.
+3. Install the Python dependencies: `pip install -r backend/requirements.txt`.
+4. Start the API locally: `uvicorn backend.main:app --reload --port 8000`.
+5. (Optional) Create a `.env` at the repo root to override `VITE_API_BASE_URL` for the frontend, `ALLOWED_ORIGINS` for CORS, and provide `GEMINI_API_KEY` (plus `GEMINI_MODEL` / `PLAN_THRESHOLD`) so the backend can generate workout & diet plans.
+
+For quick testing without chatting through the UI, hit:
+
+- `GET /predict/sample-features` to inspect a valid payload.
+- `POST /predict/sample` to run that payload through the model.
+- `POST /predict` with your own JSON body whenever you're ready.
+- High-risk cases (`>=40%`) can request Gemini-powered workout and/or diet plans via the chat, `POST /plan`, or instantly via `POST /plan/sample` (with `plan_type`/`probability` query params).
